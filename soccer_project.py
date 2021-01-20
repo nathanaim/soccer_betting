@@ -11,6 +11,8 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from datetime import datetime
+from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
 
 
 con=sqlite3.connect(r'C:\Users\natha\Documents\DevProj\Soccer\SoccerDB.sqlite')
@@ -52,7 +54,34 @@ def get_players_attributes(match_api_id):
         away_team_players_attributes.extend(player_attributes)
     return home_team_players_attributes,away_team_players_attributes
 
+#fonction pour simplifier les formations des équipes (10 groupes)
+
+def match_formation_preprocessing(match_df):
+    kmeans=KMeans(n_clusters=10)
+    home_team_coordinates=pd.concat([match_df.loc[:,'home_player_X1':'home_player_X11'],match_df.loc[:,'home_player_Y1':'home_player_Y11']],axis=1).reset_index(drop=True)
+    cols_to_drop_home=home_team_coordinates.columns
+    home_team_coordinates.columns=[i for i in range(22)]
+    away_team_coordinates=pd.concat([match_df.loc[:,'away_player_X1':'away_player_X11'],match_df.loc[:,'away_player_Y1':'away_player_Y11']],axis=1).reset_index(drop=True)
+    cols_to_drop_away=away_team_coordinates.columns
+    away_team_coordinates.columns=[i for i in range(22)]
+    team_coordinates=pd.concat([home_team_coordinates,away_team_coordinates],axis=0)
+    kmeans.fit(team_coordinates)
+    
+    match_df.reset_index(inplace=True,drop=True)
+    home_formations=kmeans.predict(home_team_coordinates)
+    home_formations=pd.Series(home_formations,name='home_formation')
+    match_df.drop(list(cols_to_drop_away),inplace=True,axis=1)
+    match_df=pd.concat([match_df,home_formations],axis=1)
+    away_formations=kmeans.predict(away_team_coordinates)
+    away_formations=pd.Series(away_formations,name='away_formation')
+    match_df.drop(list(cols_to_drop_home),inplace=True,axis=1)
+    match_df=pd.concat([match_df,away_formations],axis=1)
+    return match_df
+    
+
+    
 #fonction pour recuperer les positions des joueurs pour un match
+
 def get_players_positions(match_api_id):
     home_team_coordinates=[]
     away_team_coordinates=[]
@@ -76,7 +105,7 @@ def players_attributes_preprocessing(players_attributes):
     players_attributes['attacking_work_rate'][players_attributes['attacking_work_rate'].map(lambda x:x not in ['medium','high','low'])]='medium'
     players_attributes['attacking_work_rate'].replace({'low':1,'medium':2,'high':3},inplace=True)
     players_attributes['preferred_foot'][players_attributes['preferred_foot'].map(lambda x:x not in ['left','right'])]='right'
-    players_attributes['preferred_foot'].replace({'left':-1,'right':1},inplace=True)
+    players_attributes['preferred_foot'].replace({'left':0,'right':1},inplace=True)
     players_attributes.iloc[:,9:]=players_attributes.iloc[:,9:].fillna(players_attributes.iloc[:,9:].mean())
     return players_attributes
 
@@ -93,19 +122,13 @@ def get_match_result(match_api_id):
 
 def team_attributes_preprocessing(team_attributes):
     team_attributes['buildUpPlayDribbling']=team_attributes['buildUpPlayDribbling'].fillna(team_attributes['buildUpPlayDribbling'].mean())
-    team_attributes['buildUpPlaySpeedClass']=team_attributes['buildUpPlaySpeedClass'].replace({'Slow':1,'Balanced':2,'Fast':3})
-    team_attributes['buildUpPlayDribblingClass']=team_attributes['buildUpPlayDribblingClass'].replace({'Little':1,'Normal':2,'Lots':3})
-    team_attributes['buildUpPlayPassingClass']=team_attributes['buildUpPlayPassingClass'].replace({'Short':1,'Mixed':2,'Long':3})
-    team_attributes['buildUpPlayPositioningClass']=team_attributes['buildUpPlayPositioningClass'].replace({'Organised':1,'Free Form':2})
-    team_attributes['chanceCreationPassingClass']=team_attributes['chanceCreationPassingClass'].replace({'Safe':1,'Normal':2,'Risky':3})
-    team_attributes['chanceCreationCrossingClass']=team_attributes['chanceCreationCrossingClass'].replace({'Little':1,'Normal':2,'Lots':3})
-    team_attributes['chanceCreationShootingClass']=team_attributes['chanceCreationShootingClass'].replace({'Little':1,'Normal':2,'Lots':3})
-    team_attributes['chanceCreationPositioningClass']=team_attributes['chanceCreationPositioningClass'].replace({'Organised':1,'Free Form':2})
-    team_attributes['defencePressureClass']=team_attributes['defencePressureClass'].replace({'Deep':1,'Medium':2,'High':3})
-    team_attributes['defenceAggressionClass']=team_attributes['defenceAggressionClass'].replace({'Press':1,'Double':2,'Contain':3})
-    team_attributes['defenceTeamWidthClass']=team_attributes['defenceTeamWidthClass'].replace({'Wide':1,'Normal':2,'Narrow':3})
-    team_attributes['defenceDefenderLineClass']=team_attributes['defenceDefenderLineClass'].replace({'Cover':1,'Offside Trap':2})
+    list_to_encode=['buildUpPlaySpeedClass','buildUpPlayDribblingClass','buildUpPlayPassingClass','buildUpPlayPositioningClass','chanceCreationPassingClass','chanceCreationCrossingClass','chanceCreationShootingClass','chanceCreationPositioningClass','defencePressureClass','defenceAggressionClass','defenceTeamWidthClass','defenceDefenderLineClass']
+    for col in list_to_encode:
+        col_one_hot=pd.get_dummies(team_attributes[col],prefix=col)
+        team_attributes.drop(col,axis=1,inplace=True)
+        team_attributes=pd.concat([team_attributes,col_one_hot],axis=1)
     return team_attributes
+
 
 def get_teams_attributes(match_api_id):
     date_string=match_clean[match_clean['match_api_id']==match_api_id]['date'].iloc[0]
@@ -130,14 +153,16 @@ def get_teams_attributes(match_api_id):
 
 def build_data_for_match(match_api_id):
     home_team_players_attributes,away_team_players_attributes=get_players_attributes(match_api_id)
-    home_team_coordinates,away_team_coordinates=get_players_positions(match_api_id)
     home_team_attributes,away_team_attributes=get_teams_attributes(match_api_id)
+    home_team_formation=match_clean[match_clean['match_api_id']==match_api_id]['home_formation'].to_numpy()
+    away_team_formation=match_clean[match_clean['match_api_id']==match_api_id]['away_formation'].to_numpy()
     result, home_team_goal, away_team_goal=get_match_result(match_api_id)
-    home_team_data=np.concatenate((home_team_attributes,home_team_coordinates,home_team_players_attributes))
-    away_team_data=np.concatenate((away_team_attributes,away_team_coordinates,away_team_players_attributes))
+    home_team_data=np.concatenate((home_team_attributes,home_team_formation,home_team_players_attributes))
+    away_team_data=np.concatenate((away_team_attributes,away_team_formation,away_team_players_attributes))
     match_data=np.concatenate(([match_api_id],home_team_data,away_team_data))
     data_and_result=np.concatenate((match_data,result))
     return data_and_result
+
 
 def build_data_set(match_api_id_list):
     error_count=0
@@ -153,12 +178,44 @@ def build_data_set(match_api_id_list):
             print("Dataset is now composed of {} examples".format(i-error_count))
     return data_set
 
+match_clean=match_formation_preprocessing(match_clean)
 players_attributes=players_attributes_preprocessing(players_attributes)
 team_attributes=team_attributes_preprocessing(team_attributes)
+
+team_columns=list(team_attributes.columns[4:])
+player_columns=list(players_attributes.columns[4:])
+
+home_team_columns=['home_' + i for i in team_columns]
+away_team_columns=['away_' + i for i in team_columns]
+
+home_team_columns.append('home_formation')
+away_team_columns.append('away_formation')
+
+home_player_columns=['home_1' + i for i in player_columns]
+for j in range(2,12):
+    to_add=['home_{}'.format(j) + i for i in player_columns]
+    home_player_columns.extend(to_add)
+    
+away_player_columns=['away_1' + i for i in player_columns]
+for j in range(2,12):
+    to_add=['away_{}'.format(j) + i for i in player_columns]
+    away_player_columns.extend(to_add)
+
+
+home_team_columns.extend(home_player_columns)
+away_team_columns.extend(away_player_columns)
+
+home_team_columns.extend(away_team_columns)
+
+header=['match_api_id']
+header.extend(home_team_columns)
+results_list=['H','D','A']
+header.extend(results_list)
+
 
 match_api_id_list=match_clean['match_api_id'].iloc[:]
 
 data_set=build_data_set(match_api_id_list)
 
-pd.DataFrame(data_set).to_csv(r'C:\Users\natha\Documents\DevProj\Soccer\dataset_Fifa.csv',header=None,index=None)
+pd.DataFrame(data_set).to_csv(r'C:\Users\natha\Documents\DevProj\Soccer\dataset_Fifa_test.csv',header=header,index=None)
 
